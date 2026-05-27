@@ -1,0 +1,380 @@
+#!/usr/bin/env python3
+import argparse
+import curses
+import math
+import re
+import shutil
+import subprocess
+import sys
+import time
+from dataclasses import dataclass
+from enum import Enum
+
+
+class Mode(Enum):
+    FOCUS = "focus"
+    SHORT = "short break"
+    LONG = "long break"
+
+
+@dataclass
+class Config:
+    focus: int
+    short: int
+    long: int
+    rounds: int
+    notify: bool
+    sound: bool
+
+
+class Pomodoro:
+    def __init__(self, config: Config):
+        self.config = config
+        self.mode = Mode.FOCUS
+        self.running = False
+        self.completed_focus = 0
+        self.total_focus = 0
+        self.message = "READY"
+        self._set_duration()
+
+    def _set_duration(self):
+        minutes = {
+            Mode.FOCUS: self.config.focus,
+            Mode.SHORT: self.config.short,
+            Mode.LONG: self.config.long,
+        }[self.mode]
+        self.duration = minutes * 60
+        self.remaining = self.duration
+
+    def reset_current(self):
+        self.running = False
+        self._set_duration()
+        self.message = "RESET"
+
+    def set_desired_time(self, seconds: int):
+        self.running = False
+        self.duration = seconds
+        self.remaining = seconds
+        self.message = f"SET {fmt(seconds)}"
+
+    def skip(self):
+        self._complete_period(skipped=True)
+
+    def toggle(self):
+        self.running = not self.running
+        self.message = "ACTIVE" if self.running else "PAUSED"
+
+    def tick(self):
+        if not self.running:
+            return
+        self.remaining -= 1
+        if self.remaining <= 0:
+            self._complete_period()
+
+    def _complete_period(self, skipped=False):
+        finished = self.mode
+        if finished == Mode.FOCUS and not skipped:
+            self.completed_focus += 1
+            self.total_focus += 1
+
+        if finished == Mode.FOCUS:
+            if self.completed_focus > 0 and self.completed_focus % self.config.rounds == 0:
+                self.mode = Mode.LONG
+            else:
+                self.mode = Mode.SHORT
+        else:
+            self.mode = Mode.FOCUS
+
+        self.running = False
+        self._set_duration()
+        label = "SKIPPED" if skipped else "COMPLETE"
+        self.message = f"{finished.value.upper()} {label}"
+        alert(f"{finished.value.title()} {label}", f"Next: {self.mode.value}", self.config)
+
+
+def parse_args() -> Config:
+    parser = argparse.ArgumentParser(
+        prog="pomo",
+        description="A clean terminal pomodoro timer for Kitty/ZSH.",
+    )
+    parser.add_argument("-f", "--focus", type=int, default=25, help="focus minutes")
+    parser.add_argument("-s", "--short", type=int, default=5, help="short break minutes")
+    parser.add_argument("-l", "--long", type=int, default=15, help="long break minutes")
+    parser.add_argument("-r", "--rounds", type=int, default=4, help="focus rounds before a long break")
+    parser.add_argument("--no-notify", action="store_true", help="disable desktop notifications")
+    parser.add_argument("--no-sound", action="store_true", help="disable terminal bell")
+    args = parser.parse_args()
+
+    for name in ("focus", "short", "long", "rounds"):
+        if getattr(args, name) < 1:
+            parser.error(f"{name} must be at least 1")
+
+    return Config(
+        focus=args.focus,
+        short=args.short,
+        long=args.long,
+        rounds=args.rounds,
+        notify=not args.no_notify,
+        sound=not args.no_sound,
+    )
+
+
+def alert(title: str, body: str, config: Config):
+    if config.sound:
+        print("\a", end="", flush=True)
+    if config.notify and shutil.which("notify-send"):
+        subprocess.run(["notify-send", "Pomodoro", f"{title}\n{body}"], check=False)
+
+
+def fmt(seconds: int) -> str:
+    seconds = max(0, seconds)
+    return f"{seconds // 60:02}:{seconds % 60:02}"
+
+
+def parse_desired_time(value: str) -> int | None:
+    value = value.strip().lower()
+    if not value:
+        return None
+
+    if re.fullmatch(r"\d+:\d{1,2}", value):
+        minutes, seconds = value.split(":", 1)
+        if int(seconds) > 59:
+            return None
+        return max(1, int(minutes) * 60 + int(seconds))
+
+    match = re.fullmatch(r"(\d+)\s*([ms]?)", value)
+    if not match:
+        return None
+
+    amount = int(match.group(1))
+    unit = match.group(2)
+    seconds = amount if unit == "s" else amount * 60
+    return max(1, seconds)
+
+
+def center(stdscr, y: int, text: str, attr=0):
+    height, width = stdscr.getmaxyx()
+    if y < 0 or y >= height:
+        return
+    x = max(0, (width - len(text)) // 2)
+    stdscr.addnstr(y, x, text, max(0, width - x - 1), attr)
+
+
+def progress_bar(width: int, fraction: float) -> str:
+    width = max(8, width)
+    fill = max(0, min(width, round(width * fraction)))
+    return "━" * fill + "─" * (width - fill)
+
+
+def write_at(stdscr, y: int, x: int, text: str, attr=0):
+    height, width = stdscr.getmaxyx()
+    if y < 0 or y >= height or x >= width:
+        return
+    stdscr.addnstr(y, max(0, x), text, max(0, width - max(0, x) - 1), attr)
+
+
+def metric(stdscr, y: int, x: int, label: str, value: str, label_attr=0, value_attr=0):
+    write_at(stdscr, y, x, label.upper(), label_attr)
+    write_at(stdscr, y + 1, x, value, value_attr)
+
+
+def draw_rule(stdscr, y: int, left: int, width: int, attr=0):
+    write_at(stdscr, y, left, "─" * max(0, width), attr)
+
+
+def draw(stdscr, app: Pomodoro):
+    stdscr.erase()
+    height, width = stdscr.getmaxyx()
+    compact = height < 22 or width < 78
+
+    colors = {
+        Mode.FOCUS: curses.color_pair(1),
+        Mode.SHORT: curses.color_pair(2),
+        Mode.LONG: curses.color_pair(3),
+    }
+    accent = colors[app.mode]
+    muted = curses.color_pair(4)
+    dim = curses.color_pair(5)
+    strong = curses.A_BOLD | accent
+
+    title = "POMO"
+    mode = app.mode.value.upper()
+    timer = fmt(app.remaining)
+    elapsed = app.duration - app.remaining
+    fraction = elapsed / app.duration if app.duration else 0
+    status = "RUN" if app.running else "HOLD"
+    next_long_in = app.config.rounds - (app.completed_focus % app.config.rounds)
+
+    panel_width = min(width - 6, 96)
+    panel_width = max(34, panel_width)
+    left = max(2, (width - panel_width) // 2)
+    top = max(1, height // 2 - (7 if compact else 10))
+
+    header = f"{title} / {mode}"
+    write_at(stdscr, top, left, header, strong)
+    write_at(stdscr, top, left + panel_width - len(status), status, strong if app.running else muted)
+    draw_rule(stdscr, top + 1, left, panel_width, dim)
+
+    if compact:
+        center(stdscr, top + 3, timer, curses.A_BOLD | accent)
+        bar_width = min(panel_width, max(16, width - 8))
+        center(stdscr, top + 5, progress_bar(bar_width, fraction), accent)
+        center(stdscr, top + 7, f"{elapsed // 60:02}m elapsed / {app.duration // 60:02}m total", muted)
+        center(stdscr, top + 9, f"{app.message} · cycles {app.total_focus}", muted)
+    else:
+        draw_big_digits(stdscr, top + 3, timer, accent)
+
+        bar_width = panel_width
+        write_at(stdscr, top + 10, left, progress_bar(bar_width, fraction), accent)
+        draw_rule(stdscr, top + 12, left, panel_width, dim)
+
+        col_gap = panel_width // 4
+        metric(stdscr, top + 14, left, "elapsed", fmt(elapsed), dim, muted | curses.A_BOLD)
+        metric(stdscr, top + 14, left + col_gap, "remaining", timer, dim, accent | curses.A_BOLD)
+        metric(stdscr, top + 14, left + col_gap * 2, "cycles", str(app.total_focus), dim, muted | curses.A_BOLD)
+        metric(stdscr, top + 14, left + col_gap * 3, "long break in", str(next_long_in), dim, muted | curses.A_BOLD)
+
+        write_at(stdscr, top + 18, left, app.message, strong)
+        write_at(stdscr, top + 18, left + panel_width - 18, "KITTY // ZSH", dim)
+
+    help_text = "[space] start/pause   [t] set time   [n] next   [r] reset   [q] quit"
+    center(stdscr, height - 2, help_text[: max(0, width - 2)], dim)
+
+    sys.stdout.write(f"\033]0;pomo {timer} {app.mode.value}\007")
+    sys.stdout.flush()
+    stdscr.refresh()
+
+
+DIGITS = {
+    "0": [" █████ ", "██   ██", "██   ██", "██   ██", " █████ "],
+    "1": ["   ██  ", " ████  ", "   ██  ", "   ██  ", " █████ "],
+    "2": [" █████ ", "██   ██", "    ██ ", "  ██   ", "███████"],
+    "3": ["██████ ", "     ██", " █████ ", "     ██", "██████ "],
+    "4": ["██  ██ ", "██  ██ ", "███████", "    ██ ", "    ██ "],
+    "5": ["███████", "██     ", "██████ ", "     ██", "██████ "],
+    "6": [" █████ ", "██     ", "██████ ", "██   ██", " █████ "],
+    "7": ["███████", "    ██ ", "   ██  ", "  ██   ", " ██    "],
+    "8": [" █████ ", "██   ██", " █████ ", "██   ██", " █████ "],
+    "9": [" █████ ", "██   ██", " ██████", "     ██", " █████ "],
+    ":": ["   ", "██ ", "   ", "██ ", "   "],
+}
+
+
+def draw_big_digits(stdscr, y: int, text: str, attr):
+    rows = [""] * 5
+    for char in text:
+        glyph = DIGITS[char]
+        for i, part in enumerate(glyph):
+            rows[i] += part + " "
+
+    width = stdscr.getmaxyx()[1]
+    x = max(0, (width - len(rows[0])) // 2)
+    for i, row in enumerate(rows):
+        stdscr.addnstr(y + i, x, row.rstrip(), max(0, width - x - 1), attr | curses.A_BOLD)
+
+
+def prompt_desired_time(stdscr, app: Pomodoro):
+    height, width = stdscr.getmaxyx()
+    prompt = "set time [25, 25m, 1:30, 90s]: "
+    y = max(0, height - 3)
+    x = max(1, (width - 44) // 2)
+    max_len = max(4, min(12, width - x - len(prompt) - 2))
+
+    app.running = False
+    app.message = "SET TIME"
+    draw(stdscr, app)
+    write_at(stdscr, y, x, " " * min(width - x - 1, len(prompt) + max_len + 1))
+    write_at(stdscr, y, x, prompt, curses.color_pair(4) | curses.A_BOLD)
+    stdscr.refresh()
+
+    previous_timeout = 100
+    stdscr.nodelay(False)
+    stdscr.timeout(-1)
+    curses.echo()
+    try:
+        curses.curs_set(1)
+    except curses.error:
+        pass
+
+    try:
+        raw = stdscr.getstr(y, x + len(prompt), max_len).decode(errors="ignore")
+    finally:
+        curses.noecho()
+        try:
+            curses.curs_set(0)
+        except curses.error:
+            pass
+        stdscr.nodelay(True)
+        stdscr.timeout(previous_timeout)
+
+    seconds = parse_desired_time(raw)
+    if seconds is None:
+        app.message = "INVALID TIME"
+        return
+    app.set_desired_time(seconds)
+
+
+def setup_colors():
+    try:
+        curses.start_color()
+        if not curses.has_colors():
+            return
+        try:
+            curses.use_default_colors()
+            background = -1
+        except curses.error:
+            background = curses.COLOR_BLACK
+        curses.init_pair(1, curses.COLOR_MAGENTA, background)
+        curses.init_pair(2, curses.COLOR_YELLOW, background)
+        curses.init_pair(3, curses.COLOR_CYAN, background)
+        curses.init_pair(4, curses.COLOR_WHITE, background)
+        curses.init_pair(5, curses.COLOR_BLUE, background)
+    except curses.error:
+        pass
+
+
+def run(stdscr, config: Config):
+    try:
+        curses.curs_set(0)
+    except curses.error:
+        pass
+    stdscr.nodelay(True)
+    stdscr.timeout(100)
+    setup_colors()
+    app = Pomodoro(config)
+    last_second = math.floor(time.monotonic())
+
+    while True:
+        now = math.floor(time.monotonic())
+        if now != last_second:
+            for _ in range(now - last_second):
+                app.tick()
+            last_second = now
+
+        draw(stdscr, app)
+        key = stdscr.getch()
+        if key in (ord("q"), ord("Q")):
+            break
+        if key == ord(" "):
+            app.toggle()
+        elif key in (ord("r"), ord("R")):
+            app.reset_current()
+        elif key in (ord("n"), ord("N")):
+            app.skip()
+        elif key in (ord("t"), ord("T")):
+            prompt_desired_time(stdscr, app)
+
+    sys.stdout.write("\033]0;\007")
+    sys.stdout.flush()
+
+
+def main():
+    config = parse_args()
+    try:
+        curses.wrapper(run, config)
+    except KeyboardInterrupt:
+        pass
+
+
+if __name__ == "__main__":
+    main()
