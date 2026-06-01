@@ -6,7 +6,10 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
+import wave
+from io import BytesIO
 from dataclasses import dataclass
 from enum import Enum
 
@@ -89,7 +92,7 @@ class Pomodoro:
         self._set_duration()
         label = "SKIPPED" if skipped else "COMPLETE"
         self.message = f"{finished.value.upper()} {label}"
-        alert(f"{finished.value.title()} {label}", f"Next: {self.mode.value}", self.config)
+        alert(f"{finished.value.title()} {label}", f"Next: {self.mode.value}", self.config, sound=not skipped)
 
 
 def parse_args() -> Config:
@@ -102,7 +105,7 @@ def parse_args() -> Config:
     parser.add_argument("-l", "--long", type=int, default=15, help="long break minutes")
     parser.add_argument("-r", "--rounds", type=int, default=4, help="focus rounds before a long break")
     parser.add_argument("--no-notify", action="store_true", help="disable desktop notifications")
-    parser.add_argument("--no-sound", action="store_true", help="disable terminal bell")
+    parser.add_argument("--no-sound", action="store_true", help="disable completion beep")
     args = parser.parse_args()
 
     for name in ("focus", "short", "long", "rounds"):
@@ -119,11 +122,51 @@ def parse_args() -> Config:
     )
 
 
-def alert(title: str, body: str, config: Config):
-    if config.sound:
-        print("\a", end="", flush=True)
+def alert(title: str, body: str, config: Config, sound: bool = True):
+    if sound and config.sound:
+        play_completion_beep()
     if config.notify and shutil.which("notify-send"):
         subprocess.run(["notify-send", "Pomodoro", f"{title}\n{body}"], check=False)
+
+
+def play_completion_beep():
+    beep = make_beep_wav()
+    for player in ("paplay", "aplay"):
+        if shutil.which(player):
+            with tempfile.NamedTemporaryFile(suffix=".wav") as wav:
+                wav.write(beep)
+                wav.flush()
+                result = subprocess.run(
+                    [player, wav.name],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                )
+            if result.returncode == 0:
+                return
+    print("\a", end="", flush=True)
+
+
+def make_beep_wav() -> bytes:
+    sample_rate = 44100
+    duration = 0.09
+    frequency = 880
+    volume = 0.12
+    frames = bytearray()
+
+    total_samples = int(sample_rate * duration)
+    for sample in range(total_samples):
+        fade = min(sample / 400, (total_samples - sample) / 400, 1)
+        value = int(32767 * volume * fade * math.sin(2 * math.pi * frequency * sample / sample_rate))
+        frames.extend(value.to_bytes(2, byteorder="little", signed=True))
+
+    output = BytesIO()
+    with wave.open(output, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(sample_rate)
+        wav.writeframes(frames)
+    return output.getvalue()
 
 
 def fmt(seconds: int) -> str:

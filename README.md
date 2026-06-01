@@ -55,3 +55,4 @@ pomo --no-sound
 ```
 
 Desktop notifications use `notify-send` when it is installed.
+Completion sound uses a short low-volume beep and falls back to the terminal bell.
