@@ -6,14 +6,14 @@ A clean, dependency-free terminal pomodoro timer for Arch Linux, Kitty, and ZSH.
 ## Run
 
 ```sh
-cd /home/maks/Projects/pomodoro-kitty
+cd ~/pomodoro-kitty
 ./pomo
 ```
 
 ## Install
 
 ```sh
-cd /home/maks/Projects/pomodoro-kitty
+cd /pomodoro-kitty
 chmod +x install.sh
 ./install.sh
 ```
