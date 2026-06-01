@@ -1,6 +1,7 @@
 # Pomodoro Kitty
 
 A clean, dependency-free terminal pomodoro timer for Arch Linux, Kitty, and ZSH.
+![Pomodoro Kitty terminal UI](assets/screenshot.png)
 
 ## Run
 
