@@ -34,9 +34,13 @@ export PATH="$HOME/.local/bin:$PATH"
 
 - `space`: start or pause
 - `t`: set a custom time for the current period
+- `c` or `s`: open settings and pick a theme
 - `n`: skip to the next period
 - `r`: reset the current period
 - `q`: quit
+
+In settings, use arrow keys or `j`/`k` to move, `enter` to select,
+number keys to jump to a theme, `x` for a random theme, and `esc` to close.
 
 The time prompt accepts minutes, seconds, or clock-style input:
 

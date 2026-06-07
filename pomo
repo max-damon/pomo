@@ -2,6 +2,7 @@
 import argparse
 import curses
 import math
+import random
 import re
 import shutil
 import subprocess
@@ -30,6 +31,25 @@ class Config:
     sound: bool
 
 
+@dataclass(frozen=True)
+class Theme:
+    name: str
+    focus: int
+    short: int
+    long: int
+    muted: int
+    dim: int
+
+
+THEMES = [
+    Theme("Kitty Pop", curses.COLOR_MAGENTA, curses.COLOR_YELLOW, curses.COLOR_CYAN, curses.COLOR_WHITE, curses.COLOR_BLUE),
+    Theme("Forest", curses.COLOR_GREEN, curses.COLOR_CYAN, curses.COLOR_BLUE, curses.COLOR_WHITE, curses.COLOR_GREEN),
+    Theme("Ember", curses.COLOR_RED, curses.COLOR_YELLOW, curses.COLOR_MAGENTA, curses.COLOR_WHITE, curses.COLOR_RED),
+    Theme("Icebox", curses.COLOR_CYAN, curses.COLOR_BLUE, curses.COLOR_WHITE, curses.COLOR_WHITE, curses.COLOR_CYAN),
+    Theme("Mono", curses.COLOR_WHITE, curses.COLOR_WHITE, curses.COLOR_WHITE, curses.COLOR_WHITE, curses.COLOR_WHITE),
+]
+
+
 class Pomodoro:
     def __init__(self, config: Config):
         self.config = config
@@ -37,8 +57,21 @@ class Pomodoro:
         self.running = False
         self.completed_focus = 0
         self.total_focus = 0
+        self.theme_index = 0
         self.message = "READY"
         self._set_duration()
+
+    @property
+    def theme(self) -> Theme:
+        return THEMES[self.theme_index]
+
+    def set_theme(self, index: int):
+        self.theme_index = index % len(THEMES)
+        self.message = f"THEME {self.theme.name.upper()}"
+
+    def random_theme(self):
+        choices = [i for i in range(len(THEMES)) if i != self.theme_index]
+        self.set_theme(random.choice(choices or range(len(THEMES))))
 
     def _set_duration(self):
         minutes = {
@@ -254,6 +287,7 @@ def draw(stdscr, app: Pomodoro):
     top = max(1, height // 2 - (7 if compact else 10))
 
     header = f"{title} / {mode}"
+    theme_label = f"THEME {app.theme.name.upper()}"
     write_at(stdscr, top, left, header, strong)
     write_at(stdscr, top, left + panel_width - len(status), status, strong if app.running else muted)
     draw_rule(stdscr, top + 1, left, panel_width, dim)
@@ -278,9 +312,9 @@ def draw(stdscr, app: Pomodoro):
         metric(stdscr, top + 14, left + col_gap * 3, "long break in", str(next_long_in), dim, muted | curses.A_BOLD)
 
         write_at(stdscr, top + 18, left, app.message, strong)
-        write_at(stdscr, top + 18, left + panel_width - 18, "KITTY // ZSH", dim)
+        write_at(stdscr, top + 18, left + panel_width - len(theme_label), theme_label, dim)
 
-    help_text = "[space] start/pause   [t] set time   [n] next   [r] reset   [q] quit"
+    help_text = "[space] start/pause   [t] set time   [c] settings   [n] next   [r] reset   [q] quit"
     center(stdscr, height - 2, help_text[: max(0, width - 2)], dim)
 
     sys.stdout.write(f"\033]0;pomo {timer} {app.mode.value}\007")
@@ -357,7 +391,74 @@ def prompt_desired_time(stdscr, app: Pomodoro):
     app.set_desired_time(seconds)
 
 
-def setup_colors():
+def draw_settings(stdscr, app: Pomodoro, selected: int):
+    draw(stdscr, app)
+    height, width = stdscr.getmaxyx()
+    menu_width = min(max(34, width - 8), 54)
+    menu_height = len(THEMES) + 7
+    top = max(1, (height - menu_height) // 2)
+    left = max(1, (width - menu_width) // 2)
+    muted = curses.color_pair(4)
+    dim = curses.color_pair(5)
+
+    for row in range(menu_height):
+        write_at(stdscr, top + row, left, " " * menu_width)
+
+    write_at(stdscr, top, left, " SETTINGS ".ljust(menu_width, "─"), curses.A_BOLD | muted)
+    write_at(stdscr, top + 2, left + 2, "Theme colors", curses.A_BOLD | muted)
+
+    for i, theme in enumerate(THEMES):
+        marker = ">" if i == selected else " "
+        active = "*" if i == app.theme_index else " "
+        label = f"{marker} {active} {i + 1}. {theme.name}"
+        attr = curses.A_REVERSE | curses.A_BOLD | curses.color_pair(1) if i == selected else muted
+        write_at(stdscr, top + 4 + i, left + 2, label.ljust(menu_width - 4), attr)
+
+    footer = "enter select   x random   esc close"
+    write_at(stdscr, top + menu_height - 1, left + 2, footer[: menu_width - 4], dim)
+    stdscr.refresh()
+
+
+def open_settings(stdscr, app: Pomodoro):
+    was_running = app.running
+    previous_message = app.message
+    app.running = False
+    selected = app.theme_index
+    app.message = "SETTINGS"
+
+    previous_timeout = 100
+    stdscr.nodelay(False)
+    stdscr.timeout(-1)
+    try:
+        while True:
+            draw_settings(stdscr, app, selected)
+            key = stdscr.getch()
+            if key in (27, ord("q"), ord("Q")):
+                break
+            if key in (curses.KEY_UP, ord("k"), ord("K")):
+                selected = (selected - 1) % len(THEMES)
+            elif key in (curses.KEY_DOWN, ord("j"), ord("J")):
+                selected = (selected + 1) % len(THEMES)
+            elif key in (curses.KEY_ENTER, 10, 13):
+                app.set_theme(selected)
+                setup_colors(app.theme)
+            elif key in (ord("x"), ord("X")):
+                app.random_theme()
+                selected = app.theme_index
+                setup_colors(app.theme)
+            elif ord("1") <= key <= ord(str(len(THEMES))):
+                selected = key - ord("1")
+                app.set_theme(selected)
+                setup_colors(app.theme)
+    finally:
+        if app.message == "SETTINGS":
+            app.message = previous_message
+        app.running = was_running
+        stdscr.nodelay(True)
+        stdscr.timeout(previous_timeout)
+
+
+def setup_colors(theme: Theme):
     try:
         curses.start_color()
         if not curses.has_colors():
@@ -367,11 +468,11 @@ def setup_colors():
             background = -1
         except curses.error:
             background = curses.COLOR_BLACK
-        curses.init_pair(1, curses.COLOR_MAGENTA, background)
-        curses.init_pair(2, curses.COLOR_YELLOW, background)
-        curses.init_pair(3, curses.COLOR_CYAN, background)
-        curses.init_pair(4, curses.COLOR_WHITE, background)
-        curses.init_pair(5, curses.COLOR_BLUE, background)
+        curses.init_pair(1, theme.focus, background)
+        curses.init_pair(2, theme.short, background)
+        curses.init_pair(3, theme.long, background)
+        curses.init_pair(4, theme.muted, background)
+        curses.init_pair(5, theme.dim, background)
     except curses.error:
         pass
 
@@ -383,8 +484,9 @@ def run(stdscr, config: Config):
         pass
     stdscr.nodelay(True)
     stdscr.timeout(100)
-    setup_colors()
+    stdscr.keypad(True)
     app = Pomodoro(config)
+    setup_colors(app.theme)
     last_second = math.floor(time.monotonic())
 
     while True:
@@ -406,6 +508,9 @@ def run(stdscr, config: Config):
             app.skip()
         elif key in (ord("t"), ord("T")):
             prompt_desired_time(stdscr, app)
+        elif key in (ord("c"), ord("C"), ord("s"), ord("S")):
+            open_settings(stdscr, app)
+            last_second = math.floor(time.monotonic())
 
     sys.stdout.write("\033]0;\007")
     sys.stdout.flush()
