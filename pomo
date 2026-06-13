@@ -133,7 +133,7 @@ def parse_args() -> Config:
         prog="pomo",
         description="A clean terminal pomodoro timer for Kitty/ZSH.",
     )
-    parser.add_argument("-f", "--focus", type=int, default=25, help="focus minutes")
+    parser.add_argument("-f", "--focus", type=int, default=15, help="focus minutes")
     parser.add_argument("-s", "--short", type=int, default=5, help="short break minutes")
     parser.add_argument("-l", "--long", type=int, default=15, help="long break minutes")
     parser.add_argument("-r", "--rounds", type=int, default=4, help="focus rounds before a long break")
